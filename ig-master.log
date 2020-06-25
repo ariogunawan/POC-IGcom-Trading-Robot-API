@@ -1,0 +1,11 @@
+****************** BATCH RUNNING ******************
+Start time:  2020-06-25 18:10:03.113545
+
+PRICE [ CS.D.USDJPY.MINI.IP - HOUR ]:  1 records inserted
+PRICE [ CS.D.USDJPY.MINI.IP - MINUTE_5 ]:  19 records inserted
+ANALYSIS: [ CS.D.USDJPY.MINI.IP - MINUTE_5 ]: Updated
+ANALYSIS: [ CS.D.USDJPY.MINI.IP - HOUR ]: Updated
+CLEANED: Nothing
+
+End time:  2020-06-25 18:10:04.475522
+****************** BATCH COMPLETED ******************
