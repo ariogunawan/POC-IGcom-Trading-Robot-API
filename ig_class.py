@@ -1,5 +1,6 @@
 import inspect
-import datetime
+from datetime import datetime
+from dateutil import tz
 import mysql.connector as cn
 import requests
 import ig_constant as ig
@@ -7,6 +8,15 @@ import pandas as pd
 from talib import abstract as ta
 from sqlalchemy import create_engine
 
+# HARDCODED PARTS
+# 1. IGWrapper.getLatestPrices
+# 2. TradingTools.updateAnalysisTable
+# 3. Database:
+# - vw_missing_analysis (WHERE condition)
+# - vw_price_analysis (COLUMN to add from analysis table)
+# - price_analysis
+# - temp_analysis
+# END HARDCODED PARTS
 
 class IGWrapper():
     def __init__(self):
@@ -14,8 +24,8 @@ class IGWrapper():
         self.headers = ig.headers
         method = 'POST'
         url = '/session'
-        data = dict(identifier=ig.API_USERNAME, password=ig.API_PASSWORD)
-        endpoint_url = ig.ENDPOINT_URL
+        data = dict(identifier=ig.IG_API_USERNAME, password=ig.IG_API_PASSWORD)
+        endpoint_url = ig.IG_ENDPOINT_URL
         endpoint_url += url
         response = self.session.request(method, endpoint_url, headers=self.headers, json=data).json()
         oauthToken = response['oauthToken']
@@ -26,7 +36,7 @@ class IGWrapper():
         self.headers['Version'] = '2'
         method = 'GET'
         url = '/workingorders'
-        endpoint_url = ig.ENDPOINT_URL
+        endpoint_url = ig.IG_ENDPOINT_URL
         endpoint_url += url
         response = self.session.request(method, endpoint_url, headers=self.headers).json()
         return response
@@ -35,7 +45,7 @@ class IGWrapper():
         self.headers['Version'] = '3'
         method = 'GET'
         url = '/prices'
-        endpoint_url = ig.ENDPOINT_URL
+        endpoint_url = ig.IG_ENDPOINT_URL
         endpoint_url += url
         endpoint_url += '/' + data['epic'] + '?resolution=' + data['resolution'] + '&from=' \
                         + data['start_date'] + '&to=' + data['end_date']
@@ -47,7 +57,7 @@ class IGWrapper():
         self.headers['Version'] = '3'
         method = 'GET'
         url = '/prices'
-        endpoint_url = ig.ENDPOINT_URL
+        endpoint_url = ig.IG_ENDPOINT_URL
         endpoint_url += url
         endpoint_url += '/' + data['epic'] + '?resolution=' + data['resolution'] + '&max=2'  # hardcoded
         response = self.session.request(method, endpoint_url, headers=self.headers).json()
@@ -69,10 +79,86 @@ class TradingTools():
         mysql_time_format = '%Y-%m-%d %H:%M:%S'
         broker_time_format = '%Y-%m-%dT%H:%M:%S'
         # change raw string datetime to datetime object
-        raw_datetime = datetime.datetime.strptime(time, source_time_format)
+        raw_datetime = datetime.strptime(time, source_time_format)
         mysql_datetime = raw_datetime.strftime(mysql_time_format)
         broker_datetime = raw_datetime.strftime(broker_time_format)
         return mysql_datetime if destination.upper() == 'DB' else broker_datetime
+    
+    @staticmethod
+    def utcToLocal(utctime):
+        from_zone = tz.tzutc()
+        to_zone = tz.tzlocal()
+        utctime = datetime.strptime(utctime, '%Y-%m-%d %H:%M:%S')
+        # Tell the datetime object that it's in UTC time zone since
+        # datetime objects are 'naive' by default
+        utctime = utctime.replace(tzinfo=from_zone)
+        # Convert time zone
+        localtime = utctime.astimezone(to_zone)
+        return localtime
+
+    def datediff(self, date1, date2):
+        diff = date2 - date1
+        days, seconds = diff.days, diff.seconds
+        hours = diff.total_seconds() / 3600
+        minutes = (diff.days*1440 + diff.seconds/60)
+        seconds = seconds % 60
+        return hours, minutes, seconds
+
+    def loadCurrency(self, d_loadCurrency):
+        method = 'GET'
+        url = '/latest'
+        endpoint_url = ig.FIXER_ENDPOINT_URL
+        endpoint_url += url
+        endpoint_url += '?access_key=' + ig.FIXER_API_KEY + '&base=' + d_loadCurrency.get('base') + '&symbols='
+        symbols = ','.join(d_loadCurrency.get('symbols'))
+        endpoint_url += symbols
+        session = requests.session()
+        response = session.request(method, endpoint_url).json()
+        return response
+
+    def insertCurrency(self, d_insertCurrency):
+        global conn, mycursor, query, i, epic, resolution
+        try:
+            conn = cn.connect(user=ig.MYSQL_USERNAME, password=ig.MYSQL_PASSWORD,
+                              host=ig.MYSQL_HOST, database=ig.MYSQL_DATABASE)
+            mycursor = conn.cursor(buffered=True, dictionary=True)
+            query = """
+            truncate table currency
+            """
+            mycursor.execute(query)
+            conn.commit()
+            query = """
+            insert into currency (currency_code, base_value, currency_effdatetime)
+            select %(base)s, 1, %(currency_effdatetime)s from dual         
+            where not exists (select 1 from currency c 
+            where c.currency_code = %(base)s 
+            and c.currency_effdatetime = %(currency_effdatetime)s)
+            union
+            select %(currency_code)s, %(base_value)s, %(currency_effdatetime)s from dual
+            where not exists (select 1 from currency c 
+            where c.currency_code = %(currency_code)s 
+            and c.currency_effdatetime = %(currency_effdatetime)s)
+            """
+            utctime = datetime.utcfromtimestamp(d_insertCurrency.get('timestamp')).strftime('%Y-%m-%d %H:%M:%S')
+            localtime = TradingTools.utcToLocal(utctime).strftime('%Y-%m-%d %H:%M:%S')
+            l_rates = d_insertCurrency.get('rates').items()
+            l_currency = []
+            for t in l_rates:
+                d_currency = dict(base=d_insertCurrency.get('base'), currency_code=t[0], base_value=t[1], currency_effdatetime=localtime)
+                l_currency.append(d_currency)
+            for l_symbol in l_currency:
+                mycursor.execute(query, l_symbol)
+            conn.commit()
+            print('CURRENCY RATES: Refreshed')
+            # UPDATE action table
+            TradingTools.updateActionTable('load_currency_rates', None, None, localtime)
+        except (cn.Error, cn.Warning) as e:
+            print('Something wrong with ', inspect.currentframe().f_code.co_name)
+            print('Query = ', query)
+            print('Error = ', e)
+        finally:
+            mycursor.close()
+            conn.close()
 
     def parsePrices(self, d_getPrice, response):
         l_prices = []
@@ -119,7 +205,8 @@ class TradingTools():
             conn.close()
         return rows
 
-    def updateActionTable(self, action_name, action_value, action_message):
+    @staticmethod
+    def updateActionTable(action_name, action_value, action_message, action_datetime):
         global conn, mycursor, query
         try:
             conn = cn.connect(user=ig.MYSQL_USERNAME, password=ig.MYSQL_PASSWORD,
@@ -127,21 +214,34 @@ class TradingTools():
             mycursor = conn.cursor(buffered=True)
             query = """
              update action
-             set action_value = %(action_value)s, action_message = %(action_message)s
-             where action_name = %(action_name)s
-             and coalesce(action_value, '') <> %(action_value)s
+             set action_datetime = action_datetime 
              """
-            d_action = dict(action_name=action_name, action_value=action_value, action_message=action_message)
+            if not(action_value is None):
+                query += """
+                 , action_value = %(action_value)s
+                """
+            if not(action_message is None):
+                query += """
+                 , action_message = %(action_message)s
+                """
+            if not(action_datetime is None):
+                query += """
+                 , action_datetime = %(action_datetime)s
+                """
+            query += """
+             where action_name = %(action_name)s
+            """
+            d_action = dict(action_name=action_name, action_value=action_value, action_message=action_message, action_datetime=action_datetime)
             mycursor.execute(query, d_action)
             conn.commit()
             if d_action.get('action_name') == 'batch_status':
                 if d_action.get('action_value') == 'R':
                     print('****************** BATCH RUNNING ******************')
-                    print('Start time: ', datetime.datetime.now())
+                    print('Start time: ', datetime.now())
                     print()
                 elif d_action.get('action_value') == 'C':
                     print()
-                    print('End time: ', datetime.datetime.now())
+                    print('End time: ', datetime.now())
                     print('****************** BATCH COMPLETED ******************')
             else:
                 print('ACTION: [', d_action.get('action_name'), '] = ', d_action.get('action_value'))
@@ -261,8 +361,11 @@ class TradingTools():
                 if df.dropna().empty:
                     print('ANALYSIS: Nothing to update')
                 else:
+                    # hardcoded
                     # add EMA 22
-                    df['ema_22'] = ta.EMA(df, timeperiod=22, price='close') #hardcoded
+                    df['ema_22'] = ta.EMA(df, timeperiod=22, price='close')
+                    # add engulfing
+                    df['cdl_engulfing'] = ta.CDLENGULFING(df['open'], df['high'], df['low'], df['close'])
                     # round them to 8 decimals
                     df = df.round({'ema_22': 8}) #hardcoded
                     query = """
@@ -279,10 +382,11 @@ class TradingTools():
                     query = """
                     update price_analysis pa
                     join temp_analysis t on t.price_id_fk = pa.price_id_fk
-                    SET pa.ema_22 = coalesce(t.ema_22, pa.ema_22)
+                    SET pa.ema_22 = coalesce(t.ema_22, pa.ema_22),
+                    pa.cdl_engulfing = coalesce(t.cdl_engulfing, pa.cdl_engulfing)
                     """
                     cnx.execute(query)
-                    print('ANALYSIS: [', d_updateAnalysisRow.get('epic'), '-', d_updateAnalysisRow.get('resolution'), ']: Updated')
+                    print('ANALYSIS [', d_updateAnalysisRow.get('epic'), '-', d_updateAnalysisRow.get('resolution'), ']: Updated')
         except (cn.Error, cn.Warning) as e:
             print('Something wrong with ', inspect.currentframe().f_code.co_name)
             print('Query = ', query)

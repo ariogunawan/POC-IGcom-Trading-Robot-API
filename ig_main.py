@@ -1,4 +1,5 @@
 from ig_class import IGWrapper, TradingTools
+from datetime import datetime
 
 trade = IGWrapper()
 util = TradingTools()
@@ -13,7 +14,15 @@ if d_action_names['batch_status'].get('action_value') != 'C':
     print('Process halted! Batch Status = ', d_action_names['batch_status'].get('action_value'))
     exit()
 else:
-    util.updateActionTable('batch_status', 'R', None)
+    util.updateActionTable('batch_status', 'R', None, None)
+
+# LOAD currency rates for today section
+currency_datediff = util.datediff(d_action_names['load_currency_rates'].get('action_datetime'), datetime.now())
+if d_action_names['load_currency_rates'].get('action_value') == 'Y'\
+        and currency_datediff[0] >= int(d_action_names['load_currency_rates'].get('action_message')):
+    d_loadCurrency = dict(base='EUR', symbols=['USD','AUD','JPY','GBP','XAU','NZD','CHF','CAD','IDR'])
+    d_insertCurrency = (util.loadCurrency(d_loadCurrency))
+    util.insertCurrency(d_insertCurrency)
 
 # UPDATE price section
 if d_action_names['update_price'].get('action_value') == 'Y':
@@ -53,4 +62,4 @@ if d_action_names['update_analysis'].get('action_value') == 'Y':
 if d_action_names['truncate_old_data'].get('action_value') == 'Y':
     util.deletePrices(d_action_names['truncate_old_data'].get('action_message'))
 # EXIT
-util.updateActionTable('batch_status', 'C', None)
+util.updateActionTable('batch_status', 'C', None, None)
