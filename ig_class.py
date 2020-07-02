@@ -41,33 +41,67 @@ class IGWrapper():
         response = self.session.request(method, endpoint_url, headers=self.headers).json()
         return response
 
-    def getPrices(self, data):
+    def getPrices(self, d_getPrices):
         self.headers['Version'] = '3'
         method = 'GET'
         url = '/prices'
         endpoint_url = ig.IG_ENDPOINT_URL
         endpoint_url += url
-        endpoint_url += '/' + data['epic'] + '?resolution=' + data['resolution'] + '&from=' \
-                        + data['start_date'] + '&to=' + data['end_date']
+        endpoint_url += '/' + d_getPrices['epic'] + '?resolution=' + d_getPrices['resolution'] + '&from=' \
+                        + d_getPrices['start_date'] + '&to=' + d_getPrices['end_date']
         response = self.session.request(method, endpoint_url, headers=self.headers).json()
-        response.update(epic=data['epic'], resolution=data['resolution'])
+        response.update(epic=d_getPrices['epic'], resolution=d_getPrices['resolution'])
         return response
 
-    def getLatestPrices(self, data):
+    def getLatestPrices(self, d_getLatestPrice):
         self.headers['Version'] = '3'
         method = 'GET'
         url = '/prices'
         endpoint_url = ig.IG_ENDPOINT_URL
         endpoint_url += url
-        endpoint_url += '/' + data['epic'] + '?resolution=' + data['resolution'] + '&max=2'  # hardcoded
+        endpoint_url += '/' + d_getLatestPrice['epic'] + '?resolution=' + d_getLatestPrice['resolution'] + '&max=2'  # hardcoded
         response = self.session.request(method, endpoint_url, headers=self.headers).json()
-        response.update(epic=data['epic'], resolution=data['resolution'])
+        response.update(epic=d_getLatestPrice['epic'], resolution=d_getLatestPrice['resolution'])
         return response
 
+    def getWatchlists(self, d_getWatchLists):
+        self.headers['Version'] = '1'
+        method = 'GET'
+        url = '/watchlists'
+        endpoint_url = ig.IG_ENDPOINT_URL
+        endpoint_url += url
+        if not(d_getWatchLists is None):
+            endpoint_url += '/' + d_getWatchLists['id']
+        response = self.session.request(method, endpoint_url, headers=self.headers).json()
+        return response
+
+    def getMarkets(self, epic):
+        self.headers['Version'] = '3'
+        method = 'GET'
+        url = '/markets'
+        endpoint_url = ig.IG_ENDPOINT_URL
+        endpoint_url += url
+        if not(epic is None):
+            endpoint_url += '/' + epic
+        response = self.session.request(method, endpoint_url, headers=self.headers).json()
+        return response
 
 class TradingTools():
     def __init__(self):
         pass
+
+    def raiseError(error_message):
+        conn = cn.connect(user=ig.MYSQL_USERNAME, password=ig.MYSQL_PASSWORD,
+                          host=ig.MYSQL_HOST, database=ig.MYSQL_DATABASE)
+        mycursor = conn.cursor(buffered=True)
+        query = """
+        insert into error_log (error_log_message) values (%s)
+        """
+        mycursor.execute(query, (error_message, ))
+        conn.commit()
+        print('RAISED ERROR: ', error_message)
+        mycursor.close()
+        conn.close()
 
     @staticmethod
     def strToTime(time, destination):
@@ -146,16 +180,21 @@ class TradingTools():
             for t in l_rates:
                 d_currency = dict(base=d_insertCurrency.get('base'), currency_code=t[0], base_value=t[1], currency_effdatetime=localtime)
                 l_currency.append(d_currency)
+            i = 0
             for l_symbol in l_currency:
                 mycursor.execute(query, l_symbol)
+                i += mycursor.rowcount
             conn.commit()
-            print('CURRENCY RATES: Refreshed')
+            print('CURRENCY EXCHANGE: ', i, 'records updated') if i > 0 \
+                else print('CURRENCY EXCHANGE: Nothing to update')
             # UPDATE action table
             TradingTools.updateActionTable('load_currency_rates', None, None, localtime)
         except (cn.Error, cn.Warning) as e:
             print('Something wrong with ', inspect.currentframe().f_code.co_name)
             print('Query = ', query)
             print('Error = ', e)
+            error_message = inspect.currentframe().f_code.co_name + ': ' + str(e)
+            TradingTools.raiseError(error_message)
         finally:
             mycursor.close()
             conn.close()
@@ -163,26 +202,64 @@ class TradingTools():
     def parsePrices(self, d_getPrice, response):
         l_prices = []
         for price in response['prices']:
-            data = dict(epic=d_getPrice.get('epic'),
-                        resolution=d_getPrice.get('resolution'),
-                        snapshotTime=TradingTools.strToTime(price.get('snapshotTime'), 'DB'),
-                        snapshotTimeUTC=TradingTools.strToTime(price.get('snapshotTimeUTC'), 'DB'),
-                        openPrice_bid=price['openPrice'].get('bid'),
-                        openPrice_ask=price['openPrice'].get('ask'),
-                        openPrice_mid=round((price['openPrice'].get('bid') + price['openPrice'].get('ask')) / 2, 8),
-                        closePrice_bid=price['closePrice'].get('bid'),
-                        closePrice_ask=price['closePrice'].get('ask'),
-                        closePrice_mid=round((price['closePrice'].get('bid') + price['closePrice'].get('ask')) / 2, 8),
-                        highPrice_bid=price['highPrice'].get('bid'),
-                        highPrice_ask=price['highPrice'].get('ask'),
-                        highPrice_mid=round((price['highPrice'].get('bid') + price['highPrice'].get('ask')) / 2, 8),
-                        lowPrice_bid=price['lowPrice'].get('bid'),
-                        lowPrice_ask=price['lowPrice'].get('ask'),
-                        lowPrice_mid=round((price['lowPrice'].get('bid') + price['lowPrice'].get('ask')) / 2, 8),
-                        lastTradedVolume=price.get('lastTradedVolume')
+            data = dict(epic=d_getPrice['epic'],
+                        resolution=d_getPrice['resolution'],
+                        snapshotTime=TradingTools.strToTime(price['snapshotTime'], 'DB'),
+                        snapshotTimeUTC=TradingTools.strToTime(price['snapshotTimeUTC'], 'DB'),
+                        openPrice_bid=price['openPrice']['bid'],
+                        openPrice_ask=price['openPrice']['ask'],
+                        openPrice_mid=round((price['openPrice']['bid'] + price['openPrice']['ask']) / 2, 8),
+                        closePrice_bid=price['closePrice']['bid'],
+                        closePrice_ask=price['closePrice']['ask'],
+                        closePrice_mid=round((price['closePrice']['bid'] + price['closePrice']['ask']) / 2, 8),
+                        highPrice_bid=price['highPrice']['bid'],
+                        highPrice_ask=price['highPrice']['ask'],
+                        highPrice_mid=round((price['highPrice']['bid'] + price['highPrice']['ask']) / 2, 8),
+                        lowPrice_bid=price['lowPrice']['bid'],
+                        lowPrice_ask=price['lowPrice']['ask'],
+                        lowPrice_mid=round((price['lowPrice']['bid'] + price['lowPrice']['ask']) / 2, 8),
+                        lastTradedVolume=price['lastTradedVolume']
                         )
             l_prices.append(data)
         return l_prices
+
+    def parseWatchlists(self, l_watchlists):
+        l_res_watchlists = []
+        for l_watchlist in l_watchlists:
+            d_watchlist = dict(epic=l_watchlist['instrument']['epic'],
+                               name=l_watchlist['instrument']['name'],
+                               forceOpenAllowed=l_watchlist['instrument']['forceOpenAllowed'],
+                               stopsLimitsAllowed=l_watchlist['instrument']['stopsLimitsAllowed'],
+                               lotSize=l_watchlist['instrument']['lotSize'],
+                               unit=l_watchlist['instrument']['unit'],
+                               type=l_watchlist['instrument']['type'],
+                               marketId=l_watchlist['instrument']['marketId'],
+                               currencyCode=l_watchlist['instrument']['currencies'][0]['code'],
+                               currencySymbol=l_watchlist['instrument']['currencies'][0]['symbol'],
+                               currencyBaseExchangeRate=l_watchlist['instrument']['currencies'][0]['baseExchangeRate'],
+                               currencyExchangeRate=l_watchlist['instrument']['currencies'][0]['exchangeRate'],
+                               marginDepositBands=l_watchlist['instrument']['marginDepositBands'][0]['margin'],
+                               marginFactor=l_watchlist['instrument']['marginFactor'],
+                               marginFactorUnit=l_watchlist['instrument']['marginFactorUnit'],
+                               chartCode=l_watchlist['instrument']['chartCode'],
+                               valueOfOnePip=l_watchlist['instrument']['valueOfOnePip'],
+                               onePipMeans=l_watchlist['instrument']['onePipMeans'],
+                               contractSize=l_watchlist['instrument']['contractSize'],
+                               minStepDistanceUnit=l_watchlist['dealingRules']['minStepDistance']['unit'],
+                               minStepDistanceValue=l_watchlist['dealingRules']['minStepDistance']['value'],
+                               minDealSizeUnit=l_watchlist['dealingRules']['minDealSize']['unit'],
+                               minDealSizeValue=l_watchlist['dealingRules']['minDealSize']['value'],
+                               minGuaranteedSLUnit=l_watchlist['dealingRules']['minControlledRiskStopDistance']['unit'],
+                               minGuaranteedSLValue=l_watchlist['dealingRules']['minControlledRiskStopDistance']['value'],
+                               minNormalSLUnit=l_watchlist['dealingRules']['minNormalStopOrLimitDistance']['unit'],
+                               minNormalSLValue=l_watchlist['dealingRules']['minNormalStopOrLimitDistance']['value'],
+                               trailingStopsPreference=l_watchlist['dealingRules']['trailingStopsPreference'],
+                               marketStatus=l_watchlist['snapshot']['marketStatus'],
+                               decimalPlacesFactor=l_watchlist['snapshot']['decimalPlacesFactor'],
+                               scalingFactor=l_watchlist['snapshot']['scalingFactor']
+                               )
+            l_res_watchlists.append(d_watchlist)
+        return l_res_watchlists
 
     def selectActionTable(self):
         global conn, mycursor, query, rows
@@ -200,6 +277,8 @@ class TradingTools():
             print('Something wrong with ', inspect.currentframe().f_code.co_name)
             print('Query = ', query)
             print('Error = ', e)
+            error_message = inspect.currentframe().f_code.co_name + ': ' + str(e)
+            TradingTools.raiseError(error_message)
         finally:
             mycursor.close()
             conn.close()
@@ -249,6 +328,8 @@ class TradingTools():
             print('Something wrong with ', inspect.currentframe().f_code.co_name)
             print('Query = ', query)
             print('Error = ', e)
+            error_message = inspect.currentframe().f_code.co_name + ': ' + str(e)
+            TradingTools.raiseError(error_message)
         finally:
             mycursor.close()
             conn.close()
@@ -280,6 +361,61 @@ class TradingTools():
             print('Something wrong with ', inspect.currentframe().f_code.co_name)
             print('Query = ', query)
             print('Error = ', e)
+            error_message = inspect.currentframe().f_code.co_name + ': ' + str(e)
+            TradingTools.raiseError(error_message)
+        finally:
+            mycursor.close()
+            conn.close()
+
+    def insertWatchlists(self, l_parsed_watchlists):
+        global conn, mycursor, query, i
+        try:
+            conn = cn.connect(user=ig.MYSQL_USERNAME, password=ig.MYSQL_PASSWORD,
+                              host=ig.MYSQL_HOST, database=ig.MYSQL_DATABASE)
+            mycursor = conn.cursor(buffered=True, dictionary=True)
+            query = """insert into watchlist (epic, name, forceOpenAllowed, stopsLimitsAllowed, lotSize, unit, type, marketId, currencyCode, currencySymbol, currencyBaseExchangeRate, currencyExchangeRate, marginDepositBands, marginFactor, marginFactorUnit, chartCode, valueOfOnePip, onePipMeans, contractSize, minStepDistanceUnit, minStepDistanceValue, minDealSizeUnit, minDealSizeValue, minGuaranteedSLUnit, minGuaranteedSLValue, minNormalSLUnit, minNormalSLValue, trailingStopsPreference, marketStatus, decimalPlacesFactor, scalingFactor) 
+            select %(epic)s, %(name)s, %(forceOpenAllowed)s, %(stopsLimitsAllowed)s, %(lotSize)s, %(unit)s, %(type)s, %(marketId)s, %(currencyCode)s, %(currencySymbol)s, %(currencyBaseExchangeRate)s, %(currencyExchangeRate)s, %(marginDepositBands)s, %(marginFactor)s, %(marginFactorUnit)s, %(chartCode)s, %(valueOfOnePip)s, %(onePipMeans)s, %(contractSize)s, %(minStepDistanceUnit)s, %(minStepDistanceValue)s, %(minDealSizeUnit)s, %(minDealSizeValue)s, %(minGuaranteedSLUnit)s, %(minGuaranteedSLValue)s, %(minNormalSLUnit)s, %(minNormalSLValue)s, %(trailingStopsPreference)s, %(marketStatus)s, %(decimalPlacesFactor)s, %(scalingFactor)s
+            from dual where not exists (select 1 from watchlist w where w.epic = %(epic)s) """
+            i = 0
+            for l_parsed_watchlist in l_parsed_watchlists:
+                mycursor.execute(query, l_parsed_watchlist)
+                i += mycursor.rowcount
+            conn.commit()
+            print('WATCHLIST: ', i, 'records inserted') if i > 0 \
+                else print('WATCHLIST: Nothing to insert')
+        except (cn.Error, cn.Warning) as e:
+            print('Something wrong with ', inspect.currentframe().f_code.co_name)
+            print('Query = ', query)
+            print('Error = ', e)
+            error_message = inspect.currentframe().f_code.co_name + ': ' + str(e)
+            TradingTools.raiseError(error_message)
+        finally:
+            mycursor.close()
+            conn.close()
+
+    def updateWatchlists(self, l_parsed_watchlists):
+        global conn, mycursor, query, i
+        try:
+            conn = cn.connect(user=ig.MYSQL_USERNAME, password=ig.MYSQL_PASSWORD,
+                              host=ig.MYSQL_HOST, database=ig.MYSQL_DATABASE)
+            mycursor = conn.cursor(buffered=True, dictionary=True)
+            query = """update watchlist w 
+            set name  = %(name)s, forceOpenAllowed  = %(forceOpenAllowed)s, stopsLimitsAllowed  = %(stopsLimitsAllowed)s, lotSize  = %(lotSize)s, unit  = %(unit)s, type  = %(type)s, marketId  = %(marketId)s, currencyCode  = %(currencyCode)s, currencySymbol  = %(currencySymbol)s, currencyBaseExchangeRate  = %(currencyBaseExchangeRate)s, currencyExchangeRate  = %(currencyExchangeRate)s, marginDepositBands  = %(marginDepositBands)s, marginFactor  = %(marginFactor)s, marginFactorUnit  = %(marginFactorUnit)s, chartCode  = %(chartCode)s, valueOfOnePip  = %(valueOfOnePip)s, onePipMeans  = %(onePipMeans)s, contractSize  = %(contractSize)s, minStepDistanceUnit  = %(minStepDistanceUnit)s, minStepDistanceValue  = %(minStepDistanceValue)s, minDealSizeUnit  = %(minDealSizeUnit)s, minDealSizeValue  = %(minDealSizeValue)s, minGuaranteedSLUnit  = %(minGuaranteedSLUnit)s, minGuaranteedSLValue  = %(minGuaranteedSLValue)s, minNormalSLUnit  = %(minNormalSLUnit)s, minNormalSLValue  = %(minNormalSLValue)s, trailingStopsPreference  = %(trailingStopsPreference)s, marketStatus  = %(marketStatus)s, decimalPlacesFactor  = %(decimalPlacesFactor)s, scalingFactor  = %(scalingFactor)s
+            where epic = %(epic)s
+            """
+            i = 0
+            for l_parsed_watchlist in l_parsed_watchlists:
+                mycursor.execute(query, l_parsed_watchlist)
+                i += mycursor.rowcount
+            conn.commit()
+            print('WATCHLIST: ', i, 'records updated') if i > 0 \
+                else print('WATCHLIST: Nothing to update')
+        except (cn.Error, cn.Warning) as e:
+            print('Something wrong with ', inspect.currentframe().f_code.co_name)
+            print('Query = ', query)
+            print('Error = ', e)
+            error_message = inspect.currentframe().f_code.co_name + ': ' + str(e)
+            TradingTools.raiseError(error_message)
         finally:
             mycursor.close()
             conn.close()
@@ -308,6 +444,8 @@ class TradingTools():
             print('Something wrong with ', inspect.currentframe().f_code.co_name)
             print('Query = ', query)
             print('Error = ', e)
+            error_message = inspect.currentframe().f_code.co_name + ': ' + str(e)
+            TradingTools.raiseError(error_message)
         finally:
             mycursor.close()
             conn.close()
@@ -341,6 +479,8 @@ class TradingTools():
             print('Something wrong with ', inspect.currentframe().f_code.co_name)
             print('Query = ', query)
             print('Error = ', e)
+            error_message = inspect.currentframe().f_code.co_name + ': ' + str(e)
+            TradingTools.raiseError(error_message)
         finally:
             mycursor.close()
             conn.close()
@@ -391,6 +531,8 @@ class TradingTools():
             print('Something wrong with ', inspect.currentframe().f_code.co_name)
             print('Query = ', query)
             print('Error = ', e)
+            error_message = inspect.currentframe().f_code.co_name + ': ' + str(e)
+            TradingTools.raiseError(error_message)
         finally:
             cnx.dispose()
 
@@ -415,6 +557,8 @@ class TradingTools():
             print('Something wrong with ', inspect.currentframe().f_code.co_name)
             print('Query = ', query)
             print('Error = ', e)
+            error_message = inspect.currentframe().f_code.co_name + ': ' + str(e)
+            TradingTools.raiseError(error_message)
         finally:
             mycursor.close()
             conn.close()
