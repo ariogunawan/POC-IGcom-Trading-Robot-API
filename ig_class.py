@@ -5,8 +5,11 @@ import mysql.connector as cn
 import requests
 import ig_constant as ig
 import pandas as pd
+import collections
 from talib import abstract as ta
 from sqlalchemy import create_engine
+from decimal import Decimal
+
 
 # HARDCODED PARTS
 # 1. IGWrapper.getLatestPrices
@@ -32,10 +35,19 @@ class IGWrapper():
         ig.headers['Authorization'] = oauthToken['token_type'] + ' ' + oauthToken['access_token']
         ig.headers['IG-ACCOUNT-ID'] = response['accountId']
 
-    def getWorkingOrders(self):
+    def getAccounts(self):
+        self.headers['Version'] = '1'
+        method = 'GET'
+        url = '/accounts'
+        endpoint_url = ig.IG_ENDPOINT_URL
+        endpoint_url += url
+        response = self.session.request(method, endpoint_url, headers=self.headers).json()
+        return response
+
+    def getPositions(self):
         self.headers['Version'] = '2'
         method = 'GET'
-        url = '/workingorders'
+        url = '/positions'
         endpoint_url = ig.IG_ENDPOINT_URL
         endpoint_url += url
         response = self.session.request(method, endpoint_url, headers=self.headers).json()
@@ -59,7 +71,8 @@ class IGWrapper():
         url = '/prices'
         endpoint_url = ig.IG_ENDPOINT_URL
         endpoint_url += url
-        endpoint_url += '/' + d_getLatestPrice['epic'] + '?resolution=' + d_getLatestPrice['resolution'] + '&max=2'  # hardcoded
+        endpoint_url += '/' + d_getLatestPrice['epic'] + '?resolution=' + d_getLatestPrice[
+            'resolution'] + '&max=2'  # hardcoded
         response = self.session.request(method, endpoint_url, headers=self.headers).json()
         response.update(epic=d_getLatestPrice['epic'], resolution=d_getLatestPrice['resolution'])
         return response
@@ -70,7 +83,7 @@ class IGWrapper():
         url = '/watchlists'
         endpoint_url = ig.IG_ENDPOINT_URL
         endpoint_url += url
-        if not(d_getWatchLists is None):
+        if not (d_getWatchLists is None):
             endpoint_url += '/' + d_getWatchLists['id']
         response = self.session.request(method, endpoint_url, headers=self.headers).json()
         return response
@@ -81,9 +94,29 @@ class IGWrapper():
         url = '/markets'
         endpoint_url = ig.IG_ENDPOINT_URL
         endpoint_url += url
-        if not(epic is None):
+        if not (epic is None):
             endpoint_url += '/' + epic
         response = self.session.request(method, endpoint_url, headers=self.headers).json()
+        return response
+
+    def setEntryVariables(self, d_positions, d_accounts):
+        d_response = dict(open_position=len(d_positions['positions']),
+                          balance_amount=d_accounts['accounts'][0]['balance'].get('balance'),
+                          margin_available=d_accounts['accounts'][0]['balance'].get('available'),
+                          margin_used=(d_accounts['accounts'][0]['balance']['balance'] -
+                                       d_accounts['accounts'][0]['balance']['available']) /
+                                      d_accounts['accounts'][0]['balance']['balance'] * 100,
+                          today_day_name='trade_' + datetime.today().strftime('%A').lower())
+        return d_response
+
+    def createPosition(self, d_createPosition):
+        self.headers['Version'] = '2'
+        method = 'POST'
+        url = '/positions/otc'
+        endpoint_url = ig.IG_ENDPOINT_URL
+        endpoint_url += url
+        data = d_createPosition
+        response = self.session.request(method, endpoint_url, headers=self.headers, json=data).json()
         return response
 
 class TradingTools():
@@ -97,7 +130,7 @@ class TradingTools():
         query = """
         insert into error_log (error_log_message) values (%s)
         """
-        mycursor.execute(query, (error_message, ))
+        mycursor.execute(query, (error_message,))
         conn.commit()
         print('RAISED ERROR: ', error_message)
         mycursor.close()
@@ -117,7 +150,7 @@ class TradingTools():
         mysql_datetime = raw_datetime.strftime(mysql_time_format)
         broker_datetime = raw_datetime.strftime(broker_time_format)
         return mysql_datetime if destination.upper() == 'DB' else broker_datetime
-    
+
     @staticmethod
     def utcToLocal(utctime):
         from_zone = tz.tzutc()
@@ -134,7 +167,7 @@ class TradingTools():
         diff = date2 - date1
         days, seconds = diff.days, diff.seconds
         hours = diff.total_seconds() / 3600
-        minutes = (diff.days*1440 + diff.seconds/60)
+        minutes = (diff.days * 1440 + diff.seconds / 60)
         seconds = seconds % 60
         return hours, minutes, seconds
 
@@ -178,7 +211,8 @@ class TradingTools():
             l_rates = d_insertCurrency.get('rates').items()
             l_currency = []
             for t in l_rates:
-                d_currency = dict(base=d_insertCurrency.get('base'), currency_code=t[0], base_value=t[1], currency_effdatetime=localtime)
+                d_currency = dict(base=d_insertCurrency.get('base'), currency_code=t[0], base_value=t[1],
+                                  currency_effdatetime=localtime)
                 l_currency.append(d_currency)
             i = 0
             for l_symbol in l_currency:
@@ -241,6 +275,10 @@ class TradingTools():
                                marginDepositBands=l_watchlist['instrument']['marginDepositBands'][0]['margin'],
                                marginFactor=l_watchlist['instrument']['marginFactor'],
                                marginFactorUnit=l_watchlist['instrument']['marginFactorUnit'],
+                               slippageFactorUnit=l_watchlist['instrument']['slippageFactor']['unit'],
+                               slippageFactorValue=l_watchlist['instrument']['slippageFactor']['value'],
+                               limitedRiskPremUnit=l_watchlist['instrument']['limitedRiskPremium']['unit'],
+                               limitedRiskPremValue=l_watchlist['instrument']['limitedRiskPremium']['value'],
                                chartCode=l_watchlist['instrument']['chartCode'],
                                valueOfOnePip=l_watchlist['instrument']['valueOfOnePip'],
                                onePipMeans=l_watchlist['instrument']['onePipMeans'],
@@ -250,13 +288,17 @@ class TradingTools():
                                minDealSizeUnit=l_watchlist['dealingRules']['minDealSize']['unit'],
                                minDealSizeValue=l_watchlist['dealingRules']['minDealSize']['value'],
                                minGuaranteedSLUnit=l_watchlist['dealingRules']['minControlledRiskStopDistance']['unit'],
-                               minGuaranteedSLValue=l_watchlist['dealingRules']['minControlledRiskStopDistance']['value'],
+                               minGuaranteedSLValue=l_watchlist['dealingRules']['minControlledRiskStopDistance'][
+                                   'value'],
                                minNormalSLUnit=l_watchlist['dealingRules']['minNormalStopOrLimitDistance']['unit'],
                                minNormalSLValue=l_watchlist['dealingRules']['minNormalStopOrLimitDistance']['value'],
                                trailingStopsPreference=l_watchlist['dealingRules']['trailingStopsPreference'],
                                marketStatus=l_watchlist['snapshot']['marketStatus'],
                                decimalPlacesFactor=l_watchlist['snapshot']['decimalPlacesFactor'],
-                               scalingFactor=l_watchlist['snapshot']['scalingFactor']
+                               scalingFactor=l_watchlist['snapshot']['scalingFactor'],
+                               snapshotBid=l_watchlist['snapshot']['bid'],
+                               snapshotOffer=l_watchlist['snapshot']['offer'],
+                               spread=abs(l_watchlist['snapshot']['bid'] - l_watchlist['snapshot']['offer'])
                                )
             l_res_watchlists.append(d_watchlist)
         return l_res_watchlists
@@ -295,22 +337,23 @@ class TradingTools():
              update action
              set action_datetime = action_datetime 
              """
-            if not(action_value is None):
+            if not (action_value is None):
                 query += """
                  , action_value = %(action_value)s
                 """
-            if not(action_message is None):
+            if not (action_message is None):
                 query += """
                  , action_message = %(action_message)s
                 """
-            if not(action_datetime is None):
+            if not (action_datetime is None):
                 query += """
                  , action_datetime = %(action_datetime)s
                 """
             query += """
              where action_name = %(action_name)s
             """
-            d_action = dict(action_name=action_name, action_value=action_value, action_message=action_message, action_datetime=action_datetime)
+            d_action = dict(action_name=action_name, action_value=action_value, action_message=action_message,
+                            action_datetime=action_datetime)
             mycursor.execute(query, d_action)
             conn.commit()
             if d_action.get('action_name') == 'batch_status':
@@ -373,8 +416,8 @@ class TradingTools():
             conn = cn.connect(user=ig.MYSQL_USERNAME, password=ig.MYSQL_PASSWORD,
                               host=ig.MYSQL_HOST, database=ig.MYSQL_DATABASE)
             mycursor = conn.cursor(buffered=True, dictionary=True)
-            query = """insert into watchlist (epic, name, forceOpenAllowed, stopsLimitsAllowed, lotSize, unit, type, marketId, currencyCode, currencySymbol, currencyBaseExchangeRate, currencyExchangeRate, marginDepositBands, marginFactor, marginFactorUnit, chartCode, valueOfOnePip, onePipMeans, contractSize, minStepDistanceUnit, minStepDistanceValue, minDealSizeUnit, minDealSizeValue, minGuaranteedSLUnit, minGuaranteedSLValue, minNormalSLUnit, minNormalSLValue, trailingStopsPreference, marketStatus, decimalPlacesFactor, scalingFactor) 
-            select %(epic)s, %(name)s, %(forceOpenAllowed)s, %(stopsLimitsAllowed)s, %(lotSize)s, %(unit)s, %(type)s, %(marketId)s, %(currencyCode)s, %(currencySymbol)s, %(currencyBaseExchangeRate)s, %(currencyExchangeRate)s, %(marginDepositBands)s, %(marginFactor)s, %(marginFactorUnit)s, %(chartCode)s, %(valueOfOnePip)s, %(onePipMeans)s, %(contractSize)s, %(minStepDistanceUnit)s, %(minStepDistanceValue)s, %(minDealSizeUnit)s, %(minDealSizeValue)s, %(minGuaranteedSLUnit)s, %(minGuaranteedSLValue)s, %(minNormalSLUnit)s, %(minNormalSLValue)s, %(trailingStopsPreference)s, %(marketStatus)s, %(decimalPlacesFactor)s, %(scalingFactor)s
+            query = """insert into watchlist (epic, name, forceOpenAllowed, stopsLimitsAllowed, lotSize, unit, type, marketId, currencyCode, currencySymbol, currencyBaseExchangeRate, currencyExchangeRate, marginDepositBands, marginFactor, marginFactorUnit, slippageFactorUnit, slippageFactorValue, limitedRiskPremUnit, limitedRiskPremValue, chartCode, valueOfOnePip, onePipMeans, contractSize, minStepDistanceUnit, minStepDistanceValue, minDealSizeUnit, minDealSizeValue, minGuaranteedSLUnit, minGuaranteedSLValue, minNormalSLUnit, minNormalSLValue, trailingStopsPreference, marketStatus, decimalPlacesFactor, scalingFactor, snapshotBid, snapshotOffer, spread) 
+            select %(epic)s, %(name)s, %(forceOpenAllowed)s, %(stopsLimitsAllowed)s, %(lotSize)s, %(unit)s, %(type)s, %(marketId)s, %(currencyCode)s, %(currencySymbol)s, %(currencyBaseExchangeRate)s, %(currencyExchangeRate)s, %(marginDepositBands)s, %(marginFactor)s, %(marginFactorUnit)s, %(slippageFactorUnit)s, %(slippageFactorValue)s, %(limitedRiskPremUnit)s, %(limitedRiskPremValue)s, %(chartCode)s, %(valueOfOnePip)s, %(onePipMeans)s, %(contractSize)s, %(minStepDistanceUnit)s, %(minStepDistanceValue)s, %(minDealSizeUnit)s, %(minDealSizeValue)s, %(minGuaranteedSLUnit)s, %(minGuaranteedSLValue)s, %(minNormalSLUnit)s, %(minNormalSLValue)s, %(trailingStopsPreference)s, %(marketStatus)s, %(decimalPlacesFactor)s, %(scalingFactor)s, %(snapshotBid)s, %(snapshotOffer)s, %(spread)s
             from dual where not exists (select 1 from watchlist w where w.epic = %(epic)s) """
             i = 0
             for l_parsed_watchlist in l_parsed_watchlists:
@@ -400,7 +443,7 @@ class TradingTools():
                               host=ig.MYSQL_HOST, database=ig.MYSQL_DATABASE)
             mycursor = conn.cursor(buffered=True, dictionary=True)
             query = """update watchlist w 
-            set name  = %(name)s, forceOpenAllowed  = %(forceOpenAllowed)s, stopsLimitsAllowed  = %(stopsLimitsAllowed)s, lotSize  = %(lotSize)s, unit  = %(unit)s, type  = %(type)s, marketId  = %(marketId)s, currencyCode  = %(currencyCode)s, currencySymbol  = %(currencySymbol)s, currencyBaseExchangeRate  = %(currencyBaseExchangeRate)s, currencyExchangeRate  = %(currencyExchangeRate)s, marginDepositBands  = %(marginDepositBands)s, marginFactor  = %(marginFactor)s, marginFactorUnit  = %(marginFactorUnit)s, chartCode  = %(chartCode)s, valueOfOnePip  = %(valueOfOnePip)s, onePipMeans  = %(onePipMeans)s, contractSize  = %(contractSize)s, minStepDistanceUnit  = %(minStepDistanceUnit)s, minStepDistanceValue  = %(minStepDistanceValue)s, minDealSizeUnit  = %(minDealSizeUnit)s, minDealSizeValue  = %(minDealSizeValue)s, minGuaranteedSLUnit  = %(minGuaranteedSLUnit)s, minGuaranteedSLValue  = %(minGuaranteedSLValue)s, minNormalSLUnit  = %(minNormalSLUnit)s, minNormalSLValue  = %(minNormalSLValue)s, trailingStopsPreference  = %(trailingStopsPreference)s, marketStatus  = %(marketStatus)s, decimalPlacesFactor  = %(decimalPlacesFactor)s, scalingFactor  = %(scalingFactor)s
+            set name  = %(name)s, forceOpenAllowed  = %(forceOpenAllowed)s, stopsLimitsAllowed  = %(stopsLimitsAllowed)s, lotSize  = %(lotSize)s, unit  = %(unit)s, type  = %(type)s, marketId  = %(marketId)s, currencyCode  = %(currencyCode)s, currencySymbol  = %(currencySymbol)s, currencyBaseExchangeRate  = %(currencyBaseExchangeRate)s, currencyExchangeRate  = %(currencyExchangeRate)s, marginDepositBands  = %(marginDepositBands)s, marginFactor  = %(marginFactor)s, marginFactorUnit  = %(marginFactorUnit)s, slippageFactorUnit = %(slippageFactorUnit)s, slippageFactorValue = %(slippageFactorValue)s, limitedRiskPremUnit = %(limitedRiskPremUnit)s, limitedRiskPremValue = %(limitedRiskPremValue)s, chartCode  = %(chartCode)s, valueOfOnePip  = %(valueOfOnePip)s, onePipMeans  = %(onePipMeans)s, contractSize  = %(contractSize)s, minStepDistanceUnit  = %(minStepDistanceUnit)s, minStepDistanceValue  = %(minStepDistanceValue)s, minDealSizeUnit  = %(minDealSizeUnit)s, minDealSizeValue  = %(minDealSizeValue)s, minGuaranteedSLUnit  = %(minGuaranteedSLUnit)s, minGuaranteedSLValue  = %(minGuaranteedSLValue)s, minNormalSLUnit  = %(minNormalSLUnit)s, minNormalSLValue  = %(minNormalSLValue)s, trailingStopsPreference  = %(trailingStopsPreference)s, marketStatus  = %(marketStatus)s, decimalPlacesFactor  = %(decimalPlacesFactor)s, scalingFactor  = %(scalingFactor)s, snapshotBid = %(snapshotBid)s, snapshotOffer = %(snapshotOffer)s, spread = %(spread)s
             where epic = %(epic)s
             """
             i = 0
@@ -502,12 +545,17 @@ class TradingTools():
                     print('ANALYSIS: Nothing to update')
                 else:
                     # hardcoded
-                    # add EMA 22
-                    df['ema_22'] = ta.EMA(df, timeperiod=22, price='close')
+                    # add EMA 21
+                    df['ema_21'] = ta.EMA(df, timeperiod=21, price='close')
+                    # add EMA 55
+                    df['ema_55'] = ta.EMA(df, timeperiod=55, price='close')
                     # add engulfing
                     df['cdl_engulfing'] = ta.CDLENGULFING(df['open'], df['high'], df['low'], df['close'])
+                    # add closing marubozu
+                    df['cdl_closing_marubozu'] = ta.CDLCLOSINGMARUBOZU(df['open'], df['high'], df['low'], df['close'])
                     # round them to 8 decimals
-                    df = df.round({'ema_22': 8}) #hardcoded
+                    df = df.round({'ema_21': 8})  # hardcoded
+                    df = df.round({'ema_55': 8})  # hardcoded
                     query = """
                     truncate table temp_analysis
                     """
@@ -522,11 +570,14 @@ class TradingTools():
                     query = """
                     update price_analysis pa
                     join temp_analysis t on t.price_id_fk = pa.price_id_fk
-                    SET pa.ema_22 = coalesce(t.ema_22, pa.ema_22),
-                    pa.cdl_engulfing = coalesce(t.cdl_engulfing, pa.cdl_engulfing)
+                    SET pa.ema_21 = coalesce(t.ema_21, pa.ema_21),
+                    pa.ema_55 = coalesce(t.ema_55, pa.ema_55),
+                    pa.cdl_engulfing = coalesce(t.cdl_engulfing, pa.cdl_engulfing),
+                    pa.cdl_closing_marubozu = coalesce(t.cdl_closing_marubozu, pa.cdl_closing_marubozu)
                     """
                     cnx.execute(query)
-                    print('ANALYSIS [', d_updateAnalysisRow.get('epic'), '-', d_updateAnalysisRow.get('resolution'), ']: Updated')
+                    print('ANALYSIS [', d_updateAnalysisRow.get('epic'), '-', d_updateAnalysisRow.get('resolution'),
+                          ']: Updated')
         except (cn.Error, cn.Warning) as e:
             print('Something wrong with ', inspect.currentframe().f_code.co_name)
             print('Query = ', query)
@@ -548,7 +599,7 @@ class TradingTools():
             WHERE snapshotTime <= ADDDATE(CURRENT_TIMESTAMP(), INTERVAL -%s day)
             """
             i = 0
-            t_days = (days, )
+            t_days = (days,)
             mycursor.execute(query, t_days)
             i += mycursor.rowcount
             conn.commit()
@@ -562,3 +613,262 @@ class TradingTools():
         finally:
             mycursor.close()
             conn.close()
+
+    def selectEntryConfiguration(self):
+        global conn, mycursor, query, rows
+        try:
+            conn = cn.connect(user=ig.MYSQL_USERNAME, password=ig.MYSQL_PASSWORD,
+                              host=ig.MYSQL_HOST, database=ig.MYSQL_DATABASE)
+            mycursor = conn.cursor(buffered=True, dictionary=True)
+            query = """
+            SELECT *
+            FROM entry_configuration
+            WHERE epic = 'ALL'
+            """
+            mycursor.execute(query)
+            master_epic_config = mycursor.fetchone()
+            query = """
+            SELECT *
+            FROM entry_configuration
+            WHERE epic <> 'ALL'
+            and active = 'Y'
+            """
+            mycursor.execute(query)
+            active_epic_config = mycursor.fetchall()
+            l_entry_configuration = []
+            for single_active_epic_config in active_epic_config:
+                epic_config = TradingTools.combineEpicConfiguration(master_epic_config.copy(),
+                                                                    single_active_epic_config)
+                l_entry_configuration.append(epic_config)
+        except (cn.Error, cn.Warning) as e:
+            print('Something wrong with ', inspect.currentframe().f_code.co_name)
+            print('Query = ', query)
+            print('Error = ', e)
+            error_message = inspect.currentframe().f_code.co_name + ': ' + str(e)
+            TradingTools.raiseError(error_message)
+        finally:
+            mycursor.close()
+            conn.close()
+        return l_entry_configuration
+
+    @staticmethod
+    def combineEpicConfiguration(master_config, epic_config):
+        epic_config_copy = master_config
+        epic_config_copy['epic'] = epic_config['epic']
+        if not (epic_config['active'] is None):
+            epic_config_copy['active'] = epic_config['active']
+        if not (epic_config['budget_check'] is None):
+            epic_config_copy['budget_check'] = epic_config['budget_check']
+        if not (epic_config['budget_amount'] is None):
+            epic_config_copy['budget_amount'] = epic_config['budget_amount']
+        if not (epic_config['budget_percent'] is None):
+            epic_config_copy['budget_percent'] = epic_config['budget_percent']
+        if not (epic_config['min_wide'] is None):
+            epic_config_copy['min_wide'] = epic_config['min_wide']
+        if not (epic_config['delay_minute'] is None):
+            epic_config_copy['delay_minute'] = epic_config['delay_minute']
+        if not (epic_config['max_position'] is None):
+            epic_config_copy['max_position'] = epic_config['max_position']
+        if not (epic_config['max_margin_pct'] is None):
+            epic_config_copy['max_margin_pct'] = epic_config['max_margin_pct']
+        if not (epic_config['max_spread'] is None):
+            epic_config_copy['max_spread'] = epic_config['max_spread']
+        if not (epic_config['max_slippage'] is None):
+            epic_config_copy['max_slippage'] = epic_config['max_slippage']
+        if not (epic_config['take_profit'] is None):
+            epic_config_copy['take_profit'] = epic_config['take_profit']
+        if not (epic_config['stop_loss'] is None):
+            epic_config_copy['stop_loss'] = epic_config['stop_loss']
+        if not (epic_config['trade_monday'] is None):
+            epic_config_copy['trade_monday'] = epic_config['trade_monday']
+        if not (epic_config['trade_tuesday'] is None):
+            epic_config_copy['trade_tuesday'] = epic_config['trade_tuesday']
+        if not (epic_config['trade_wednesday'] is None):
+            epic_config_copy['trade_wednesday'] = epic_config['trade_wednesday']
+        if not (epic_config['trade_thursday'] is None):
+            epic_config_copy['trade_thursday'] = epic_config['trade_thursday']
+        if not (epic_config['trade_friday'] is None):
+            epic_config_copy['trade_friday'] = epic_config['trade_friday']
+        if not (epic_config['trade_saturday'] is None):
+            epic_config_copy['trade_saturday'] = epic_config['trade_saturday']
+        if not (epic_config['trade_sunday'] is None):
+            epic_config_copy['trade_sunday'] = epic_config['trade_sunday']
+        if not (epic_config['trade_start_time'] is None):
+            epic_config_copy['trade_start_time'] = epic_config['trade_start_time']
+        if not (epic_config['trade_end_time'] is None):
+            epic_config_copy['trade_end_time'] = epic_config['trade_end_time']
+        if not (epic_config['notation'] is None):
+            epic_config_copy['notation'] = epic_config['notation']
+        return epic_config_copy
+
+    def loadWatchlists(self):
+        global conn, mycursor, query, rows
+        try:
+            conn = cn.connect(user=ig.MYSQL_USERNAME, password=ig.MYSQL_PASSWORD,
+                              host=ig.MYSQL_HOST, database=ig.MYSQL_DATABASE)
+            mycursor = conn.cursor(buffered=True, dictionary=True)
+            query = """
+            SELECT *
+            FROM watchlist w
+            WHERE exists (select 1 from entry_configuration e where e.epic = w.epic and e.active = 'Y')
+            """
+            mycursor.execute(query)
+            rows = mycursor.fetchall()
+        except (cn.Error, cn.Warning) as e:
+            print('Something wrong with ', inspect.currentframe().f_code.co_name)
+            print('Query = ', query)
+            print('Error = ', e)
+            error_message = inspect.currentframe().f_code.co_name + ': ' + str(e)
+            TradingTools.raiseError(error_message)
+        finally:
+            mycursor.close()
+            conn.close()
+        return rows
+
+    def tradeDecision(self, d_entry_variables, d_entry_configuration):
+        d_trade_decision = {}
+        decision = 'Yes'
+        # Check day of trading
+        if d_entry_configuration[d_entry_variables['today_day_name']] != 'Y':
+            decision = 'No - trading day'
+        # Check max open positions
+        if d_entry_variables['open_position'] >= d_entry_configuration['max_position']:
+            decision = 'No - reached max position open : ' + str(d_entry_variables['open_position'])
+        # Check margin used
+        if d_entry_variables['margin_used'] > d_entry_configuration['max_margin_pct']:
+            decision = 'No - reached max margin used : ' + str(d_entry_variables['margin_used'])
+        # Check last open position
+        if d_entry_configuration['last_open_position'] == 'Failed':
+            decision = 'No - just opened a position a while ago'
+        # Check balance
+        budget_on_set = 0
+        budget_on_amount = d_entry_configuration['budget_amount']
+        budget_on_percent = d_entry_configuration['budget_percent'] / 100 * d_entry_variables['margin_available']
+        if d_entry_configuration['budget_check'] == 'Lowest':
+            budget_on_set = 0 + budget_on_amount if budget_on_amount < budget_on_percent else budget_on_percent
+        if d_entry_configuration['budget_check'] == 'Amount':
+            budget_on_set = 0 + budget_on_amount
+        if d_entry_configuration['budget_check'] == 'Percent':
+            budget_on_set = 0 + budget_on_percent
+        if budget_on_set >= d_entry_variables['margin_available']:
+            decision = 'No - reached max budget : ' + str(budget_on_set)
+        #
+        d_trade_decision = dict(epic=d_entry_configuration['epic'],
+                                decision=decision,
+                                entry_amount=budget_on_set,
+                                take_profit=d_entry_configuration['take_profit'],
+                                stop_loss=d_entry_configuration['stop_loss'],
+                                currency_code=d_entry_configuration['watchlist']['currencyCode'],
+                                currency_to_aud=1 / d_entry_configuration['watchlist']['currencyBaseExchangeRate'],
+                                snapshot_bid=d_entry_configuration['watchlist']['snapshotBid'],
+                                snapshot_offer=d_entry_configuration['watchlist']['snapshotOffer'],
+                                spread=d_entry_configuration['watchlist']['spread'],
+                                margin_factor=d_entry_configuration['watchlist']['marginFactor'],
+                                slippage_factor=d_entry_configuration['watchlist']['slippageFactorValue'],
+                                contract_size=d_entry_configuration['watchlist']['contractSize'],
+                                one_pip_value=d_entry_configuration['watchlist']['onePipMeans'].split(' ')[0],
+                                min_wide=d_entry_configuration['min_wide']
+                                )
+        d_trade_decision['entry_size'] = round(
+            Decimal(d_trade_decision['entry_amount']) / d_trade_decision['currency_to_aud'] / (
+                    Decimal(d_trade_decision['stop_loss']) * Decimal(d_trade_decision['one_pip_value']) +
+                    d_trade_decision[
+                        'snapshot_offer'] * d_trade_decision['margin_factor'] / 100 * d_trade_decision[
+                        'slippage_factor'] / 100) /
+            d_trade_decision['contract_size'], 1)
+        return d_trade_decision
+
+    def tradeStrategy(self, d_trade_decision):
+        global conn, mycursor, query, i, d_strategy
+        try:
+            conn = cn.connect(user=ig.MYSQL_USERNAME, password=ig.MYSQL_PASSWORD,
+                              host=ig.MYSQL_HOST, database=ig.MYSQL_DATABASE)
+            mycursor = conn.cursor(buffered=True, dictionary=True)
+            query = """
+            select epic, resolution, snapshotTime, diff_ema_21_55
+            from vw_price_analysis
+            where 1=1
+            and epic = %(epic)s
+            and resolution = %(resolution)s
+            order by snapshotTime desc
+            limit %(limit)s
+            """
+            mycursor.execute(query, d_trade_decision)
+            df = pd.DataFrame(mycursor.fetchall())
+            df.columns = mycursor.column_names
+            d_strategy = dict(name='EMA 21 & 55 Crossing. EMA 21 > 55 = BUY else SELL',
+                              minWide=d_trade_decision['min_wide'],
+                              minOppositeIndex=5,
+                              orderType='BUY' if df['diff_ema_21_55'].iloc[0] > 0 else 'SELL',
+                              rowCount=len(df),
+                              firstOppositeIndex=None,
+                              minWideStatus='Passed',
+                              firstOppositeStatus='Passed',
+                              beforeCrossingStatus='Passed',
+                              afterCrossingStatus='Passed',
+                              decision=d_trade_decision['decision'],
+                              finalResult='Failed'
+                              )
+            # Get first index where sign is opposite
+            if d_strategy['orderType'] == 'BUY':
+                try:
+                    d_strategy['firstOppositeIndex'] = df[df['diff_ema_21_55'] < 0].index[0]
+                except Exception as e:
+                    d_strategy['orderType'] == 'ERROR'
+            elif d_strategy['orderType'] == 'SELL':
+                try:
+                    d_strategy['firstOppositeIndex'] = df[df['diff_ema_21_55'] > 0].index[0]
+                except Exception as e:
+                    d_strategy['orderType'] == 'ERROR'
+            if d_strategy['firstOppositeIndex'] is None:
+                d_strategy['firstOppositeStatus'] = 'Failed'
+            if not(d_strategy['firstOppositeIndex'] is None) and d_strategy['firstOppositeIndex'] >= 0:
+                # Failed if less than 5 candles
+                if d_strategy['firstOppositeIndex'] < d_strategy['minOppositeIndex']:
+                    d_strategy['firstOppositeStatus'] = 'Failed'
+                # Failed if pips < 0.015
+                if abs(df['diff_ema_21_55'].iloc[0]) < d_strategy['minWide']:
+                    d_strategy['minWideStatus'] = 'Failed'
+                # Before sign = incrementally weaker
+                for i in range(d_strategy['firstOppositeIndex'], d_strategy['rowCount'] - 1):
+                    if d_strategy['orderType'] == 'BUY' and df['diff_ema_21_55'].iloc[i] < df['diff_ema_21_55'].iloc[i + 1]:
+                        d_strategy['beforeCrossingStatus'] = 'Failed'
+                        break
+                    elif d_strategy['orderType'] == 'SELL' and df['diff_ema_21_55'].iloc[i] > df['diff_ema_21_55'].iloc[
+                        i + 1]:
+                        d_strategy['beforeCrossingStatus'] = 'Failed'
+                        break
+                # After sign = incrementally stronger
+                for i in range(0, d_strategy['firstOppositeIndex']):
+                    if d_strategy['orderType'] == 'BUY' and df['diff_ema_21_55'].iloc[i] < df['diff_ema_21_55'].iloc[i + 1]:
+                        d_strategy['afterCrossingStatus'] = 'Failed'
+                        break
+                    elif d_strategy['orderType'] == 'SELL' and df['diff_ema_21_55'].iloc[i] > df['diff_ema_21_55'].iloc[
+                        i + 1]:
+                        d_strategy['afterCrossingStatus'] = 'Failed'
+                        break
+            # Decide final result
+            if d_strategy['decision'] == 'Yes' and d_strategy['orderType'] != 'ERROR' and not(d_strategy['firstOppositeIndex'] is None) and d_strategy['firstOppositeIndex'] >= 0 and d_strategy['minWideStatus'] == 'Passed' and d_strategy['firstOppositeStatus'] == 'Passed' and d_strategy[
+                'beforeCrossingStatus'] == 'Passed' and d_strategy['afterCrossingStatus'] == 'Passed':
+                d_strategy['finalResult'] = 'Passed'
+            print('\nDecision Making Information:\n', d_strategy)
+            print('\n')
+        except (cn.Error, cn.Warning) as e:
+            print('Something wrong with ', inspect.currentframe().f_code.co_name)
+            print('Query = ', query)
+            print('Error = ', e)
+            error_message = inspect.currentframe().f_code.co_name + ': ' + str(e)
+            TradingTools.raiseError(error_message)
+        finally:
+            mycursor.close()
+            conn.close()
+        return d_strategy
+
+    def getLatestPositions(self, d_tradePositions):
+        l_tradePositions = d_tradePositions['positions']
+        ord_dict = collections.OrderedDict()
+        for i in sorted(l_tradePositions,
+                        key=lambda x: datetime.strptime(x['position']['createdDateUTC'], '%Y-%m-%dT%H:%M:%S')):
+            ord_dict[i['market']['epic']] = datetime.strptime(i['position']['createdDateUTC'], '%Y-%m-%dT%H:%M:%S')
+        l_latestPositions = [{'epic': k, 'createdDateUTC': v} for k, v in ord_dict.items()]
+        return l_latestPositions
