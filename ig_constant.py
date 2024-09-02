@@ -1,13 +1,13 @@
 login = {
-    'ig_api_username': 'kucingjoget',
-    'ig_api_password': 'Dangdutan123!',
-    'ig_api_key': '344e0ef3719055d215069ea9a44110ff50d95ba7',
+    'ig_api_username': '',
+    'ig_api_password': '',
+    'ig_api_key': '',
     'ig_endpoint_url': 'https://demo-api.ig.com/gateway/deal',
-    'mysql_username': 'root',
-    'mysql_password': 'KucingjogetAbrakadabra123!',
-    'mysql_host': '206.189.207.174',  # '198.199.74.158',
+    'mysql_username': '',
+    'mysql_password': '',
+    'mysql_host': '',  # '198.199.74.158',
     'mysql_database': 'ig',
-    'fixer_api_key': 'e838a669c661f2f9c07ed84b72f73c9e',
+    'fixer_api_key': '',
     'fixer_endpoint_url': 'http://data.fixer.io/api'
 }
 
